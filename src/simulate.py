@@ -14,12 +14,12 @@ def simulate_main(args):
     """ take the top n most abundant genera and simulate 16S rRNA reads"""
     
     # get a list of the genera from the taxonomy
-    genera_to_count, _ = parse_taxonomy_file(args.silva_tax_path, ignore_eukaryotes=False)
+    genera_to_count, _, full_lineage_dict = parse_taxonomy_file(args.silva_tax_path, ignore_eukaryotes=False)
     genera_to_seqs = {genus: [] for genus in genera_to_count.keys()}
 
     # process the reference file and store each sequence with its corresponding genus
-    genera_to_seqs = process_reference_file(args.silva_ref_path, genera_to_seqs)
-
+    genera_to_seqs = process_reference_file(args.silva_ref_path, genera_to_seqs, full_lineage_dict)
+    
     # process the forward and reverse primer sequences
     for_primer, rev_primer = process_primer_file(args.primer_file)
 
@@ -47,7 +47,7 @@ def simulate_main(args):
     # write the metadata that details for each ID what genus and how reads there are
     write_readset_metadata(top_genera_to_id, genus_id_to_read_count, args.temp_dir)
 
-def process_reference_file(ref_path, genera_to_seqs):
+def process_reference_file(ref_path, genera_to_seqs, full_lineage_dict):
     """ take reference sequences in SILVA file and parse into dictionary indexed by genera """
 
     def parse_taxonomy_lineage_to_genus(lineage):
@@ -56,10 +56,14 @@ def process_reference_file(ref_path, genera_to_seqs):
              would return ...
              Bacteria;Firmicutes;Bacilli;Bacillales;Planococcaceae;Planococcus;
         """
-        # lineage_split = lineage.split(";")
-        # if "uncultured" not in lineage_split[-1] and "unidentified" not in lineage_split[-1]:
-        #     assert lineage_split[-2] in lineage_split[-1], f"genus {lineage_split[-2]} not in species {lineage_split[-1]}"
-        return ";".join(lineage.split(";")[:-1]) + ";"
+        lineage_split = lineage.split(";")
+        for i in range(len(lineage_split)-1, 0, -1):
+            curr_lineage = ";".join(lineage_split[:i]) + ";"
+            if full_lineage_dict[curr_lineage] == "genus":
+                return curr_lineage
+
+        # sequence is not specified to genus level
+        return ""
 
     # go through each sequences in SILVA file
     with open(ref_path, "r") as ref_file:
