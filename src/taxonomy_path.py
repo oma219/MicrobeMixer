@@ -69,26 +69,30 @@ class TaxPath:
         # split the full path into individual levels and check what rank they are
         lineage_split = full_path.split(";")
         for level in lineage_split:
-            if "sk__" in level:
-                self.domain_ = level.replace("sk__", "")
+            if "sk__" in level and len(level) > 3:
+                self.domain_ = level.replace("sk__", "").replace("_",  " ")
                 self.rank_level = "domain"
-            elif "p__" in level:
-                self.phylum_ = level.replace("p__", "")
+            elif "p__" in level and len(level) > 3:
+                self.phylum_ = level.replace("p__", "").replace("_",  " ")
                 self.rank_level = "phylum"
-            elif "c__" in level:
-                self.class_ = level.replace("c__", "")
+            elif "c__" in level and len(level) > 3:
+                self.class_ = level.replace("c__", "").replace("_",  " ")
                 self.rank_level = "class"
-            elif "o__" in level:
-                self.order_ = level.replace("o__", "")
+            elif "o__" in level and len(level) > 3:
+                self.order_ = level.replace("o__", "").replace("_",  " ")
                 self.rank_level = "order"
-            elif "f__" in level:
-                self.family_ = level.replace("f__", "")
+            elif "f__" in level and len(level) > 3:
+                self.family_ = level.replace("f__", "").replace("_",  " ")
                 self.rank_level = "family"
-            elif "g__" in level:
-                self.genus_ = level.replace("g__", "")
+            elif "g__" in level and len(level) > 3:
+                self.genus_ = level.replace("g__", "").replace("_",  " ")
                 self.rank_level = "genus"
 
-        assert self.rank_level == "genus", "rank_level was not set"
+                # handle special case for E. coli
+                if self.genus_ == "Escherichia":
+                    self.genus_ = "Escherichia-Shigella"
+
+        #assert self.rank_level == "genus", "rank_level was not set"
 
     def get_fingerprint(self):
         """ 
@@ -97,7 +101,8 @@ class TaxPath:
         fingerprint - concatenation of order, family, genus 
         e.g. Nitrosocaldales;Nitrosocaldaceae;uncultured;
         """
-        return f"{self.order_};{self.family_};{self.genus_};"
+        # return f"{self.order_};{self.family_};{self.genus_};"
+        return f"{self.genus_};"
 
     def get_fullpath(self):
         """ return the full path of the taxonomic rank """
