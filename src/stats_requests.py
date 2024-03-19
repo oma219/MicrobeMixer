@@ -12,7 +12,7 @@ from utils import log_message
 
 def stats_main(args):
     # parse the SILVA taxonomy file and create a dictionary of genera paths
-    fullpath_to_count, fingerprint_to_fullpath = parse_taxonomy_file(args.taxonomy)
+    fullpath_to_count, fingerprint_to_fullpath, full_lineage_dict = parse_taxonomy_file(args.taxonomy)
 
     # grab the file paths to studies for the given biome
     study_accessions = asyncio.run(biome_requests.grab_num_biome_studies(args.biome, print_results=False))
@@ -37,15 +37,11 @@ def get_tax_lineage(line_split):
 
     e.g. Archaea;Crenarchaeota;Nitrososphaeria;Nitrosopumilales;Nitrosopumilaceae;Candidatus Nitrosopelagicus; 42941 genus 138
          should return ...
-         Archaea;Crenarchaeota;Nitrososphaeria;Nitrosopumilales;Nitrosopumilaceae;Candidatus_Nitrosopelagicus;
+         Archaea;Crenarchaeota;Nitrososphaeria;Nitrosopumilales;Nitrosopumilaceae;Candidatus Nitrosopelagicus;
     """
-    lineage = []
-    for entry in line_split:
-        if not all([ch.isdigit() for ch in entry]):
-            lineage.append(entry)
-        else:
-            break
-    return "_".join(lineage)
+    last_pos_of_traversal = max([i for i in range(len(line_split)) if ";" in line_split[i]])
+    traversal = ' '.join(line_split[0:last_pos_of_traversal+1])
+    return traversal
 
 def get_tax_rank(line_split):
     """
@@ -62,12 +58,10 @@ def get_tax_rank(line_split):
 
     So the rule I will use is to scan for first non-number and return that 
     as the rank.
-    """
-    for i in range(len(line_split)-1, -1, -1):
-        if not any([ch.isdigit() for ch in line_split[i]]):
-            assert i > 1, "issue occurred with this line: {line_split}"
-            return line_split[i]
-    raise ValueError(f"could not find rank for this line: {line_split}")    
+    """ 
+    last_pos_of_traversal = max([i for i in range(len(line_split)) if ";" in line_split[i]])
+    tax_rank = line_split[last_pos_of_traversal+2]
+    return tax_rank 
     
 def parse_taxonomy_file(taxonomy_file, ignore_eukaryotes=True):
     """ parse the SILVA taxonomy file """
@@ -83,11 +77,11 @@ def parse_taxonomy_file(taxonomy_file, ignore_eukaryotes=True):
     log_message("info", f"found {len(genera_objs)} genera in the SILVA taxonomy file.")
 
     ########################################################
-    # IMPORTANT ASSUMPTION: We will only focus on the
+    # important assumption: we will only focus on the
     # genera in Bacteria and Archaea domains.
     ########################################################
     if ignore_eukaryotes:
-        log_message("info", f"IMPORTANT ASSUMPTION: we will only focus genera in Bacteria and Archaea domains.")
+        log_message("info", f"important assumption: we will only focus genera in Bacteria and Archaea domains.")
         genera_objs = [x for x in genera_objs if x.domain_ in ["Bacteria", "Archaea"]]
         print()
 
@@ -97,19 +91,35 @@ def parse_taxonomy_file(taxonomy_file, ignore_eukaryotes=True):
     log_message("info", f"# genera in bacteria: {num_bacteria}, # genera in archaea: {num_archaea}, # genera in eukaryota: {num_eukaryotes}\n") 
     
     #########################################################
-    # Ultimately, we want to get a read count for each genera
+    # ultimately, we want to get a read count for each genera
     # so thats the first dictionary below. 
     #
-    # However, we also know due to taxonomy discrepancies, we 
+    # however, we also know due to taxonomy discrepancies, we 
     # might not be able to figure out which genera reads belong 
     # to. So we can check if its "fingerprint" exists in the 
     # dictionary and use that to guide us a genus.
     #########################################################
     fullpath_to_count = {genera_objs[i].full_path: 0 for i in range(len(genera_objs))}
-    fingerprint_to_fullpath = {genera_objs[i].get_fingerprint(): genera_objs[i].full_path for i in range(len(genera_objs))}
-    assert len(fullpath_to_count) >= len(fingerprint_to_fullpath), "issue with building the dictionaries"
+    
+    # build a dictionary mapping fingerprint to full path
+    fingerprint_to_fullpath_list = [(genera_objs[i].get_fingerprint(), genera_objs[i].full_path) for i in range(len(genera_objs))]
+    fingerprint_to_fullpath_dict = {}; redundant_fingerprints = []
 
-    return fullpath_to_count, fingerprint_to_fullpath
+    # remove any redundant fingerprints
+    for fingerprint, full_lineage in fingerprint_to_fullpath_list:
+        if fingerprint not in fingerprint_to_fullpath_dict and fingerprint not in redundant_fingerprints:
+            fingerprint_to_fullpath_dict[fingerprint] = full_lineage
+        elif fingerprint in fingerprint_to_fullpath_dict:
+            redundant_fingerprints.append(fingerprint)
+            del fingerprint_to_fullpath_dict[fingerprint]
+            log_message("warning", f"redundant fingerprint: {fingerprint}")
+    assert len(fullpath_to_count) >= len(fingerprint_to_fullpath_dict), "issue with building the dictionaries"
+    print()
+
+    log_message("info", f"found {len(fullpath_to_count)} genera full lineages")
+    log_message("info", f"found {len(fingerprint_to_fullpath_dict)} unique fingerprints\n")
+    
+    return fullpath_to_count, fingerprint_to_fullpath_dict, full_dict
 
 def download_tsv(url):
     try:
@@ -136,9 +146,9 @@ def process_analyses_files(biome_file_paths, fullpath_to_count, fingerprint_to_f
         for index, row in df.iterrows():
             curr_classification = row.iloc[0]
 
-            # if classification is specified to at least genus level ...
-            if "g__" in curr_classification or "s__" in curr_classification:
-                curr_obj = TaxPath(curr_classification, "ebi")
+            # check if classification is to genus level at least ...
+            curr_obj = TaxPath(curr_classification, "ebi")
+            if curr_obj.rank_level == "genus" and curr_obj.domain_ in ["Bacteria", "Archaea"]:
                 curr_full_path = curr_obj.get_fullpath()
                 curr_fp = curr_obj.get_fingerprint()
 
@@ -150,7 +160,7 @@ def process_analyses_files(biome_file_paths, fullpath_to_count, fingerprint_to_f
                     fp_hits += 1
                 else:
                     no_hits += 1
-                    #print("could not find a match for this classification: ", curr_full_path)
+                    #print("could not find a match for this classification: ", curr_full_path, curr_obj.rank_level)
     
     print()
     log_message("results", f"direct_hits: {direct_hits}, fingerprint_hits: {fp_hits}, no_hits: {no_hits}")
