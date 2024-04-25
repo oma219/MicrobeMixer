@@ -9,6 +9,7 @@ from multiprocessing import Pool
 import regex
 import random
 import os
+import math
 
 def simulate_main(args):
     """ take the top n most abundant genera and simulate 16S rRNA reads"""
@@ -35,17 +36,17 @@ def simulate_main(args):
     top_genera_to_id = {key: i+1 for i, (key, value) in enumerate(top_genera_to_stats.items())}
     write_out_extracted_sequences(top_genera_extracted_regions, top_genera_to_id, args.temp_dir)
 
-    # simulate reads using ART from each extracted sequence file
-    simulate_reads_from_extracted_sequences(top_genera_to_id, args.temp_dir)
-
     # calculate number of reads to extract from each genus
-    genus_id_to_read_count = calculate_read_count_per_genus(top_genera_to_id, top_genera_to_stats, empty_genera, args.temp_dir)
+    genus_id_to_read_count, genus_id_to_fold_cov = calculate_read_count_per_genus(top_genera_to_id, top_genera_to_stats, empty_genera, args.temp_dir, args.num_reads, top_genera_extracted_regions)
+
+    # simulate reads using ART from each extracted sequence file
+    simulate_reads_from_extracted_sequences(top_genera_to_id, args.temp_dir, genus_id_to_fold_cov)
 
     # gather the required # of reads from each genus and write to final file
-    write_final_read_file(genus_id_to_read_count, args.temp_dir)
+    write_final_read_file(genus_id_to_read_count, args.temp_dir, args.output_name)
 
     # write the metadata that details for each ID what genus and how reads there are
-    write_readset_metadata(top_genera_to_id, genus_id_to_read_count, args.temp_dir)
+    write_readset_metadata(top_genera_to_id, genus_id_to_read_count, args.temp_dir, args.output_name)
 
 def process_reference_file(ref_path, genera_to_seqs, full_lineage_dict):
     """ take reference sequences in SILVA file and parse into dictionary indexed by genera """
@@ -191,44 +192,53 @@ def write_out_extracted_sequences(top_genera_extracted_regions, top_genera_to_id
 
 def run_art_command(args):
     """ generates ART command-line and runs it """
-    genus_num, temp_dir = args
+    genus_num, temp_dir, fold_cov = args
 
     # only run if the file exists ... meaning we did extract sequences
     if not os.path.exists(f"{temp_dir}genus_{genus_num}_seqs.fna"):
         log_message("warning", f"no sequences found for genus {genus_num}, skipping ...")
         return
 
-    command = f"art_illumina -ss MSv1 -amp -p -na -i {temp_dir}genus_{genus_num}_seqs.fna -l 250 -f 2000 -o {temp_dir}genus_{genus_num}_reads_"
+    command = f"art_illumina -ss MSv1 -amp -p -na -i {temp_dir}genus_{genus_num}_seqs.fna -l 250 -f {fold_cov} -o {temp_dir}genus_{genus_num}_reads_"
     run_command(command)
 
-def simulate_reads_from_extracted_sequences(top_genera_to_id, temp_dir):
+def simulate_reads_from_extracted_sequences(top_genera_to_id, temp_dir, genus_id_to_fold_cov):
     """ simulate reads from each genera in order to build final dataset """
     temp_dir = temp_dir if temp_dir[-1] == "/" else temp_dir + "/"
     log_message("info", "simulating reads from extracted sequences using ART ...\n")
 
     with Pool(20) as p:
-        p.map(run_art_command, [(genus_num, temp_dir) for genus_num in top_genera_to_id.values()])
+        p.map(run_art_command, [(genus_num, temp_dir, genus_id_to_fold_cov.get(genus_num, 0)) for genus_num in top_genera_to_id.values()])
     print()
 
-def calculate_read_count_per_genus(top_genera_to_id, top_genera_to_stats, empty_genera, temp_dir, total_read_count=200000):
-    """ calculate how many reads we want from each genus """
+def calculate_read_count_per_genus(top_genera_to_id, top_genera_to_stats, empty_genera, temp_dir, total_read_count, top_genera_extracted_regions):
+    """ 
+    calculate how many reads we want from each genus
+    and calculate the fold enrichment for each genus
+    to have enough reads
+    """
  
-    genus_id_to_read_count = {}; non_empty_genera = 0; empty_ids = []
+    genus_id_to_read_count = {}; genus_id_to_fold_cov = {}; non_empty_genera = 0; empty_ids = []
     for genus, genus_id in top_genera_to_id.items():
         # add these extra checks I found scenarios where
         # no sequences with given primers are extracted
         # or ART simply does not simulate reads from a reference.
-        if genus not in empty_genera and os.path.getsize(temp_dir + f"genus_{genus_id}_reads_1.fq") > 0:
+
+        num_extracted_regions_for_curr_genus = len(top_genera_extracted_regions[genus])
+
+        if genus not in empty_genera and num_extracted_regions_for_curr_genus > 0:
+            # calculate num_reads
             curr_ratio = top_genera_to_stats[genus][1]
             curr_read_count = int(curr_ratio * total_read_count)
 
             genus_id_to_read_count[genus_id] = curr_read_count
             total_read_count = total_read_count - curr_read_count
             non_empty_genera += 1
+                
         else:
             genus_id_to_read_count[genus_id] = 0
             empty_ids.append(genus_id)
-    
+        
     # ... evenly distribute leftover reads
     batch_size = int(total_read_count/non_empty_genera)
     total_read_count -= batch_size * non_empty_genera
@@ -238,16 +248,30 @@ def calculate_read_count_per_genus(top_genera_to_id, top_genera_to_stats, empty_
         if total_read_count > 0 and genus_id not in empty_ids:
             genus_id_to_read_count[genus_id] += 1
             total_read_count -= 1
-    return genus_id_to_read_count
 
-def write_final_read_file(genus_id_to_read_count, temp_dir):
+    # now we have the final read counts, lets calculate the fold coverage we need in simulation
+    genus_id_to_fold_cov = {}
+    for genus, genus_id in top_genera_to_id.items():
+
+        num_extracted_regions_for_curr_genus = len(top_genera_extracted_regions[genus])
+
+        if genus in empty_genera or num_extracted_regions_for_curr_genus == 0:
+            genus_id_to_fold_cov[genus_id] = 0
+        else:
+            # multiply by 2 to just have some extra reads
+            fold_cov = math.ceil(genus_id_to_read_count[genus_id] / num_extracted_regions_for_curr_genus) * 2
+            genus_id_to_fold_cov[genus_id] = fold_cov
+    
+    return genus_id_to_read_count, genus_id_to_fold_cov
+
+def write_final_read_file(genus_id_to_read_count, temp_dir, prefix_name):
     """ gather the required # of reads from each genus and write to final file """
 
     temp_dir = temp_dir if temp_dir[-1] == "/" else temp_dir + "/"
     log_message("info", "writing final read file ...")
 
     # write out the final read file
-    with open(temp_dir + "final_reads_mate_1.fq", "w") as mate1, open(temp_dir + "final_reads_mate_2.fq", "w") as mate2:
+    with open(temp_dir + f"{prefix_name}_mate_1.fq", "w") as mate1, open(temp_dir + f"{prefix_name}_mate_2.fq", "w") as mate2:
         for genus_id, read_count in genus_id_to_read_count.items():
             total_reads_needed = genus_id_to_read_count[genus_id]
             curr_read_count = 1
@@ -258,7 +282,8 @@ def write_final_read_file(genus_id_to_read_count, temp_dir):
                     in_mate1_lines = [x.strip() for x in in_mate1.readlines()]
                     in_mate2_lines = [x.strip() for x in in_mate2.readlines()]
 
-                    print(genus_id, total_reads_needed, len(in_mate1_lines), len(in_mate2_lines))
+                    # debug print statement:
+                    # print(genus_id, total_reads_needed, len(in_mate1_lines), len(in_mate2_lines))
 
                     assert len(in_mate1_lines) == len(in_mate2_lines), "mate1 and mate2 files not same length"
                     assert len(in_mate1_lines) % 4 == 0, "mate1 is not a proper length"
@@ -272,15 +297,15 @@ def write_final_read_file(genus_id_to_read_count, temp_dir):
                     mate2.write(f"@genus_{genus_id}_read_{curr_read_count}_mate2\n{in_mate2_lines[i*4+1]}\n{in_mate2_lines[i*4+2]}\n{in_mate2_lines[i*4+3]}\n")
                     curr_read_count += 1
 
-    log_message("info", f"final read file written to {temp_dir}final_reads_mate{{1,2}}.fna\n")
+    log_message("info", f"final read file written to {temp_dir}{prefix_name}_mate{{1,2}}.fna\n")
 
-def write_readset_metadata(top_genera_to_id, genus_id_to_read_count, temp_dir):
+def write_readset_metadata(top_genera_to_id, genus_id_to_read_count, temp_dir, prefix_name):
     """ write the metadata file with taxonomy lineage, genus id, and read count """
     temp_dir = temp_dir if temp_dir[-1] == "/" else temp_dir + "/"
     log_message("info", "writing readset description file ...")
 
-    with open(temp_dir + "seqtax.txt", "w") as out_fd:
+    with open(temp_dir + f"{prefix_name}_seqtax.txt", "w") as out_fd:
         for genus, genus_id in top_genera_to_id.items():
             out_fd.write(f"{genus}\t{genus_id}\t{genus_id_to_read_count[genus_id]}\n")
 
-    log_message("info", f"readset description file written to {temp_dir}seqtax.txt\n")
+    log_message("info", f"readset description file written to {temp_dir}{prefix_name}_seqtax.txt\n")

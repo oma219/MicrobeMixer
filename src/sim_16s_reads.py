@@ -29,6 +29,8 @@ def parse_arguments():
     sim_parser.add_argument("--biome-abundance", dest="biome_abund_path", type=str, default="", help="output from stats sub-command (*.tsv)", required=True)
     sim_parser.add_argument("--silva-ref", dest="silva_ref_path", type=str, default="", help="SILVA reference file (*.fasta)", required=True)
     sim_parser.add_argument("--silva-taxonomy", dest="silva_tax_path", type=str, default="", help="SILVA taxonomy file (*.txt)", required=True)
+    sim_parser.add_argument("--num-reads", dest="num_reads", type=int, default=200000, help="number of reads to simulate", required=True)
+    sim_parser.add_argument("--output-name", dest="output_name", type=str, help="output file name prefix for simulated reads", required=True)
     sim_parser.add_argument("--primers", dest="primer_file", type=str, default="", help="file containing forward and reverse primer sequences", required=True)
     sim_parser.add_argument("--temp-dir", dest="temp_dir", type=valid_dir, default="", help="temporary directory for intermediate files", required=True)
 
